@@ -1,6 +1,6 @@
 import json
 from typing import List, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 from google.cloud import bigquery
 import google.auth
 from google.api_core.exceptions import Conflict, BadRequest
@@ -117,17 +117,32 @@ class BigQueryAdaptor(Adaptor):
                 return False
         return True
 
-    def load_log_data(self, log_table_id: str, table_id: str, field_data: list, start_age: int, end_age: int):
-        pass
+    def load_log_data(self, log_table_id: str, table_id: str, field_data: list, meta_data: dict,
+                      start_age: int, end_age: int):
+        pass  # pragma: no cover
 
     def append_normal_data(self, table_id: str, field_data: List[dict], data: List[dict], type: str, **kwargs):
-        pass
+        for i in range(((len(data) - 1) // 10000) + 1):
+            start, end = i * 10000, (i + 1) * 10000
+            load_data = []
+            for line in data[start: end]:
+                load_data.append({self._escape_column_name(k): v for k, v in line.items()})
+            try:
+                errors = self.connection.insert_rows_json(self._get_table_id(table_id), load_data)
+            except BadRequest as e:  # pragma: no cover
+                return False  # pragma: no cover
+            if errors == []:
+                continue
+            else:  # pragma: no cover
+                self.logger.error("Insert {} Error: {}".format(table_id, errors), extra=self.log_context)
+                return False
+        return True
 
     def upsert_data(self, table_id: str, field_data: List[dict], data: List[dict], **kwargs):
-        pass
+        pass  # pragma: no cover
 
     def purge_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
-        pass
+        pass  # pragma: no cover
 
     def create_table(self, table_id: str, meta_data: dict, field_data: List[dict], type: str):
         # Dataset level operation
@@ -158,11 +173,15 @@ class BigQueryAdaptor(Adaptor):
                     expiration_ms=None
                 )
                 break
+        # Table Expiration
+        if isinstance(meta_data.get("expires_at", 0), (float, int)) and \
+            meta_data.get("expires_at", 0) > datetime.now().timestamp():
+            table.expires = datetime.fromtimestamp(meta_data["expires_at"])
         try:
             table = self.connection.create_table(table, True, timeout=30)
             self.logger.info("Created table {}".format(table.table_id), extra=self.log_context)
             return True
-        except BadRequest as e:
+        except BadRequest as e:  # pragma: no cover
             self.logger.error("Table Creation Failed: {}".format(e), extra=self.log_context)
             return False
 
@@ -170,7 +189,8 @@ class BigQueryAdaptor(Adaptor):
         try:
             self.connection.delete_table(self._get_table_id(table_id), not_found_ok=True, timeout=30)
         except Exception as e:  # pragma: no cover
-            return False  # pragma: no cover
+            self.logger.error("Table drop failed: {}".format(e), extra=self.log_context)
+            return False
 
     def alter_column(self, table_id: str, old_field_line: dict, new_field_line: dict):
         if not self.support_alter_column:
