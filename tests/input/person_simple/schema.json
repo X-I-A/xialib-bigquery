@@ -1,0 +1,77 @@
+[
+    {
+      "field_name": "id",
+      "key_flag": true,
+      "type_chain": ["int", "i_4"],
+      "description": "Row Number",
+      "format": null,
+      "encode": null
+    },
+    {
+      "field_name": "first_name",
+      "key_flag": true,
+      "type_chain": ["char"],
+      "description": "First Name",
+      "format": null,
+      "encode": null,
+      "default": ""
+    },
+    {
+      "field_name": "last_name",
+      "key_flag": true,
+      "type_chain": ["char"],
+      "description": "Last Name",
+      "format": null,
+      "encode": null,
+      "default": ""
+    },
+    {
+      "field_name": "email",
+      "key_flag": false,
+      "type_chain": ["char"],
+      "description": "Email Address",
+      "format": null,
+      "encode": null
+    },
+    {
+      "field_name": "gender",
+      "key_flag": false,
+      "type_chain": ["char"],
+      "description": "Gender",
+      "format": null,
+      "encode": null
+    },
+    {
+      "field_name": "city",
+      "key_flag": false,
+      "type_chain": ["char"],
+      "description": "City",
+      "format": null,
+      "encode": null
+    },
+    {
+      "field_name": "birthday",
+      "key_flag": false,
+      "type_chain": ["char", "c_10", "date"],
+      "description": "Datetime",
+      "format": "yyyy-mm-dd",
+      "encode": null
+    },
+    {
+      "field_name": "weight",
+      "key_flag": false,
+      "type_chain": ["int", "i_4"],
+      "description": "Weight",
+      "format": null,
+      "encode": null,
+      "default": 0
+    },
+    {
+      "field_name": "height",
+      "key_flag": false,
+      "type_chain": ["int", "i_4"],
+      "description": "Height",
+      "format": null,
+      "encode": null
+    }
+]
