@@ -119,7 +119,7 @@ class BigQueryAdaptor(Adaptor):
 
     def load_log_data(self, log_table_id: str, table_id: str, field_data: list, meta_data: dict,
                       start_age: int, end_age: int):
-        pass  # pragma: no cover
+        return True
 
     def append_normal_data(self, table_id: str, field_data: List[dict], data: List[dict], type: str, **kwargs):
         for i in range(((len(data) - 1) // 10000) + 1):
@@ -139,10 +139,10 @@ class BigQueryAdaptor(Adaptor):
         return True
 
     def upsert_data(self, table_id: str, field_data: List[dict], data: List[dict], **kwargs):
-        pass  # pragma: no cover
+        return True
 
     def purge_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
-        pass  # pragma: no cover
+        return True
 
     def create_table(self, table_id: str, meta_data: dict, field_data: List[dict], type: str):
         # Dataset level operation

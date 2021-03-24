@@ -10,8 +10,14 @@ from xialib_bigquery.bigquery_adaptor import BigQueryAdaptor
 ddl_table_id = "..test.simple_person_ddl"
 rand = ''.join(random.choice(string.ascii_lowercase) for i in range(3))
 std_table_id = "..test.simple_person_std_" + rand
-aged_table_id = "..test.simple_person_aged_" + rand
+aged_table_id = "..test.simple_person_aged"
+aged_log_table_id = "..test.simple_person_aged_" + rand
 expires_at = (datetime.now() + timedelta(minutes=10)).timestamp()
+
+segment_0 = {'id': '0', 'field_name': 'height', 'type_chain': ['int'], 'null': True}
+segment_1 = {'id': '1', 'field_name': 'height', 'type_chain': ['int'], 'list': [150, 151, 152, 153]}
+segment_2 = {'id': '2', 'field_name': 'height', 'type_chain': ['int'], 'min': 160, 'max': 169}
+segment_3 = {'id': '3', 'field_name': 'height', 'type_chain': ['int'], 'default': 170}
 
 with open(os.path.join('.', 'input', 'person_simple', 'schema.json'), encoding='utf-8') as fp:
     field_data = json.load(fp)
@@ -21,7 +27,6 @@ def adaptor():
     conn = bigquery.Client()
     adaptor = BigQueryAdaptor(db=conn)
     adaptor.drop_table(ddl_table_id)
-    adaptor.drop_table(std_table_id)
     adaptor.drop_table(aged_table_id)
     yield adaptor
 
@@ -51,5 +56,21 @@ def test_aged_case(adaptor: BigQueryAdaptor):
         for line in data_02:
             line["_AGE"] = line["id"] // 10 + 2
             line["_NO"] = line["id"] % 10 + 1
-    assert adaptor.create_table(aged_table_id, adaptor.log_table_meta, field_data, "aged")
-    assert adaptor.append_log_data(aged_table_id, field_data, data_02)
+    log_meta = adaptor.log_table_meta.copy()
+    log_meta.update({"expires_at": expires_at})
+    assert adaptor.create_table(aged_table_id, {}, field_data, "raw")
+    assert adaptor.create_table(aged_log_table_id, log_meta, field_data, "aged")
+    assert adaptor.append_log_data(aged_log_table_id, field_data, data_02)
+    assert adaptor.load_log_data(aged_log_table_id, aged_table_id, field_data, {}, 2, 2)
+
+    delete_list = [
+        {"_AGE": 103, "id": 1, "first_name": "Naomi", "last_name": "Gumbrell", "_OP": 'I', "_NO": 1},
+        {"_AGE": 103, "id": 1, "first_name": "Naomi", "last_name": "Gumbrell", "_OP": 'D', "_NO": 2}
+    ]
+    update_list = [{"_AGE": 104, "id": 2, "first_name": "Rodge", "last_name": "Fratczak", "city": "Paris", "_OP": 'U'}]
+
+    assert adaptor.upsert_data(aged_table_id, field_data, delete_list + update_list)
+    assert adaptor.purge_segment(aged_table_id, {}, segment_0)
+    assert adaptor.purge_segment(aged_table_id, {}, segment_1)
+    assert adaptor.purge_segment(aged_table_id, {}, segment_2)
+    assert adaptor.purge_segment(aged_table_id, {}, segment_3)
