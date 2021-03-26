@@ -34,13 +34,23 @@ class BigQueryAdaptor(Adaptor):
         'FLOAT64': ['real'],
         'STRING': ['char'],
         'BYTES': ['blob'],
-        'DATETIME': ['datetime']
+        'DATE': ['date'],
+        'TIME': ['time'],
+        'DATETIME': ['datetime'],
     }
 
     log_table_meta = {
         "partition": {"_DT": {"type": "time", "criteria": "hour"}},
         "cluster": {"_AGE": {}},
     }
+
+    dt_format = {
+        "date": "%Y-%m-%d",
+        "time": "%H:%M:%S",
+        "datetime": "%Y-%m-%dT%H:%M:%S",
+    }
+
+    delete_sql_template = "DELETE FROM {} WHERE {}"
 
     def __init__(self, db: bigquery.Client, location: str = 'EU', **kwargs):
         super().__init__(**kwargs)
@@ -67,6 +77,10 @@ class BigQueryAdaptor(Adaptor):
         if len(better_name) > 128:
             better_name = better_name[:128]
         return better_name
+
+    # ===Tools=========
+    def _sql_safe(self, input: str) -> str:
+        return input.replace(';', '')
 
     def _get_field_type(self, type_chain: list):
         for type in reversed(type_chain):
@@ -99,12 +113,130 @@ class BigQueryAdaptor(Adaptor):
         bq_table_id = '.'.join([dataset_id, table_id.split('.')[-1]])
         return bq_table_id
 
+    def _get_time_partition_condition(self, table_id: str, dt_type: str, field_name: str, start_age, end_age) -> str:
+        dt_type = "DAY" if dt_type.upper() == "hour" else dt_type.upper()
+        get_partition_sql_template = ( "SELECT DISTINCT(DATE_TRUNC(DATE({}), {})) "
+                                       "FROM {} WHERE _AGE >= {} AND _AGE <= {} ")
+        get_partition_sql = get_partition_sql_template.format(
+            self._sql_safe(field_name),
+            self._sql_safe(dt_type),
+            self._get_table_id(table_id),
+            start_age,
+            end_age
+        )
+        job = self.connection.query(get_partition_sql)
+        values = [row.values()[0] for row in job.result()]
+        null_flag = True if None in values else False
+        values = ["'" + value.strftime("%Y-%m-%d") + "'" for value in values if value is not None]
+        field_dt = "DATE_TRUNC(DATE(origin." + field_name + "), {})".format(dt_type)
+        filter = field_dt + " IN (" + ", ".join(values) + ")" if values else "1 = 0"
+        if null_flag:
+            result_sql = "(" + filter + " OR " + "origin." + field_name + " IS NULL)"
+        else:
+            result_sql = filter
+        return result_sql
+
+    def _get_std_partition_condition(self, table_id: str, field_name: str, start_age, end_age) -> str:
+        get_partition_sql_template = ( "SELECT DISTINCT({}) "
+                                       "FROM {} WHERE _AGE >= {} AND _AGE <= {} ")
+        get_partition_sql = get_partition_sql_template.format(
+            self._sql_safe(field_name),
+            self._get_table_id(table_id),
+            start_age,
+            end_age
+        )
+        job = self.connection.query(get_partition_sql)
+        values = [row.values()[0] for row in job.result()]
+        null_flag = True if None in values else False
+        values = ["'" + value + "'" for value in values if value is not None]
+        filter = "origin." + field_name + " IN (" + ", ".join(values) + ")" if values else "1 = 0"
+        if null_flag:
+            result_sql = "(" + filter + " OR " + "origin." + field_name + " IS NULL)"
+        else:
+            result_sql = filter
+        return result_sql
+
+    def _get_load_log_sql(self, log_table_id: str, table_id: str, field_data: list, meta_data: dict,
+                          start_age: int, end_age: int) -> str:
+        # Variable Name: @table_name@, @log_table_name@, @start_age@, @end_age@,
+        #                @partition@, @clustering@, @on_key_eq_key@
+        #                @field_list, @field_list, @upd_field_eq_field@
+        load_log_sql_template = (
+            "MERGE INTO {} AS origin "
+            "USING ( SELECT * EXCEPT(_AGE, _NO) FROM ( "
+            "SELECT *, ROW_NUMBER() OVER (PARTITION BY id ORDER BY _AGE DESC, _NO DESC) AS row_nb "
+            "FROM {} WHERE _AGE >= {} AND _AGE <= {}) "
+            "WHERE row_nb = 1 ) AS log_table \n"
+            "ON {} \n"
+            "AND {} \n"
+            "AND {} \n"
+            "WHEN NOT MATCHED AND _OP != 'D' THEN INSERT ({}) VALUES ({}) \n"
+            "WHEN MATCHED AND _OP = 'D' THEN DELETE \n"
+            "WHEN MATCHED AND _OP != 'D' THEN UPDATE SET {} "
+        )
+        partition_conf = meta_data.get("partition", {})
+        partition_field = list(partition_conf)[0] if partition_conf else ""
+        partition_conf = partition_conf[partition_field] if partition_field else {}
+        partition_type = partition_conf.get("type", "")
+        if partition_type == "time":
+            partition_condition = self._get_time_partition_condition(log_table_id, partition_conf["criteria"],
+                                                                     partition_field, start_age, end_age)
+        elif partition_type:
+            partition_condition = self._get_std_partition_condition(log_table_id, partition_field, start_age, end_age)
+        else:
+            partition_condition = "1 = 1"
+
+        # One level cluster limit should be sufficient
+        key_list = [field for field in field_data if field['key_flag']]
+        cluster_list = [field for field in list(meta_data.get("cluster", {})) if field in key_list]
+        cluster_field = cluster_list[0] if cluster_list else ""
+        if cluster_field:
+            cluster_condition = self._get_std_partition_condition(log_table_id, cluster_field, start_age, end_age)
+        else:
+            cluster_condition = "1 = 1"
+
+        on_key_eq_key = ' AND '.join(["origin." + field['field_name'] + ' = ' +
+                                      "log_table." + field['field_name']
+                                      for field in field_data if field['key_flag']])
+
+        all_fields = ", ".join([field['field_name'] for field in field_data])
+
+        upd_field_eq_field = ', '.join([field['field_name'] + ' = ' + "log_table." + field['field_name']
+                                        for field in field_data if not field['key_flag']])
+
+        load_log_sql = load_log_sql_template.format(
+            self._get_table_id(table_id),
+            self._get_table_id(log_table_id),
+            start_age,
+            end_age,
+            self._sql_safe(partition_condition),
+            self._sql_safe(cluster_condition),
+            self._sql_safe(on_key_eq_key),
+            self._sql_safe(all_fields),
+            self._sql_safe(all_fields),
+            self._sql_safe(upd_field_eq_field),
+        )
+
+        return load_log_sql
+
+    def _get_remove_old_log_sql(self, log_table_id: str, end_age: int):
+        old_age_condition = "_AGE <= {}".format(end_age)
+        old_dt_condition = "_DT <= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 90 MINUTE)"
+        remove_old_log_sql = self.delete_sql_template.format(
+            self._get_table_id(log_table_id),
+            self._sql_safe(" AND ".join([old_age_condition, old_dt_condition])),
+        )
+        return remove_old_log_sql
+
     def append_log_data(self, table_id: str, field_data: List[dict], data: List[dict], **kwargs):
+        conv_func_dict = self.get_dt_conv_func_dict(field_data)
         for i in range(((len(data) - 1) // 10000) + 1):
             start, end = i * 10000, (i + 1) * 10000
             load_data = []
             for line in data[start: end]:
                 line["_DT"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                for field in [k for k in line if k in conv_func_dict]:
+                    line[field] = conv_func_dict[field](line[field])
                 load_data.append({self._escape_column_name(k): v for k, v in line.items()})
             try:
                 errors = self.connection.insert_rows_json(self._get_table_id(table_id), load_data)
@@ -119,13 +251,29 @@ class BigQueryAdaptor(Adaptor):
 
     def load_log_data(self, log_table_id: str, table_id: str, field_data: list, meta_data: dict,
                       start_age: int, end_age: int):
+        """
+        Warning:
+            To make the transactional-like update, the time-partition field of original table must contain fixed value.
+        """
+        load_log_sql = self._get_load_log_sql(log_table_id, table_id, field_data, meta_data, start_age, end_age)
+        remove_old_log_sql = self._get_remove_old_log_sql(log_table_id, end_age)
+        try:
+            job = self.connection.query(load_log_sql)
+            job.result()
+        except Exception as e:  # pragma: no cover
+            return False  # pragma: no cover
+        job = self.connection.query(remove_old_log_sql)
+        job.result()
         return True
 
     def append_normal_data(self, table_id: str, field_data: List[dict], data: List[dict], type: str, **kwargs):
+        conv_func_dict = self.get_dt_conv_func_dict(field_data)
         for i in range(((len(data) - 1) // 10000) + 1):
             start, end = i * 10000, (i + 1) * 10000
             load_data = []
             for line in data[start: end]:
+                for field in [k for k in line if k in conv_func_dict]:
+                    line[field] = conv_func_dict[field](line[field])
                 load_data.append({self._escape_column_name(k): v for k, v in line.items()})
             try:
                 errors = self.connection.insert_rows_json(self._get_table_id(table_id), load_data)
@@ -139,7 +287,8 @@ class BigQueryAdaptor(Adaptor):
         return True
 
     def upsert_data(self, table_id: str, field_data: List[dict], data: List[dict], **kwargs):
-        return True
+        self.logger.error("Bigquery Adaptor does not support upsert on-the-fly", extra=self.log_context)
+        return False
 
     def purge_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
         return True
