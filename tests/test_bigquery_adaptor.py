@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import random
 import string
 from google.cloud import bigquery
+from google.api_core.exceptions import BadRequest
 from xialib_bigquery.bigquery_adaptor import BigQueryAdaptor
 
 ddl_table_id = "..test.simple_person_ddl"
