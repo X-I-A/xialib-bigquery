@@ -79,6 +79,7 @@ def test_aged_case(adaptor: BigQueryAdaptor):
     update_list = [{"_AGE": 104, "id": 2, "first_name": "Rodge", "last_name": "Fratczak", "birthday": "1971-05-25",
                     "city": "Paris", "_OP": 'U'}]
     time.sleep(2)
+    table_meta["cluster"] = {"first_name": {}}
     assert adaptor.append_log_data(aged_log_table_id, field_data, delete_list + update_list)
     assert adaptor.load_log_data(aged_log_table_id, aged_table_id, field_data, table_meta, 103, 104)
     job = adaptor.connection.query(count_sql.format((adaptor._get_table_id(aged_table_id))))

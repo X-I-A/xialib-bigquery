@@ -187,7 +187,7 @@ class BigQueryAdaptor(Adaptor):
             partition_condition = "1 = 1"
 
         # One level cluster limit should be sufficient
-        key_list = [field for field in field_data if field['key_flag']]
+        key_list = [field["field_name"] for field in field_data if field['key_flag'] and "char" in field['type_chain']]
         cluster_list = [field for field in list(meta_data.get("cluster", {})) if field in key_list]
         cluster_field = cluster_list[0] if cluster_list else ""
         if cluster_field:
@@ -289,6 +289,12 @@ class BigQueryAdaptor(Adaptor):
     def upsert_data(self, table_id: str, field_data: List[dict], data: List[dict], **kwargs):
         self.logger.error("Bigquery Adaptor does not support upsert on-the-fly", extra=self.log_context)
         return False
+
+    def purge_aged_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
+        pass
+
+    def purge_std_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
+        pass
 
     def purge_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
         return True
