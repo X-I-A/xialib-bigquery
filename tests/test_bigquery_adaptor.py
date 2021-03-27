@@ -31,20 +31,24 @@ with open(os.path.join('.', 'input', 'person_simple', 'schema.json'), encoding='
 def adaptor():
     conn = bigquery.Client()
     adaptor = BigQueryAdaptor(db=conn)
-    adaptor.drop_table(ddl_table_id)
-    adaptor.drop_table(aged_table_id)
+    adaptor.drop_table(ddl_table_id, {})
+    adaptor.drop_table(aged_table_id, {})
     yield adaptor
 
 def test_ddl(adaptor: BigQueryAdaptor):
     assert adaptor.create_table(ddl_table_id, adaptor.log_table_meta, field_data, "aged")
     adaptor.support_add_column = False
-    assert not adaptor.add_column(ddl_table_id, adaptor._age_field)
+    assert not adaptor.add_column(ddl_table_id, {}, adaptor._age_field)
     adaptor.support_add_column = True
-    assert adaptor.add_column(ddl_table_id, adaptor._seq_field)
+    assert adaptor.add_column(ddl_table_id, {}, adaptor._seq_field)
     adaptor.support_alter_column = False
-    assert not adaptor.alter_column(ddl_table_id, {'type_chain': ['char', 'c_8']}, {'type_chain': ['char', 'c_9']})
+    assert not adaptor.alter_column(ddl_table_id, {}, {'type_chain': ['char', 'c_8']}, {'type_chain': ['char', 'c_9']})
     adaptor.support_alter_column = True
-    assert adaptor.alter_column(ddl_table_id, {'type_chain': ['char', 'c_8']}, {'type_chain': ['char', 'c_9']})
+    assert adaptor.alter_column(ddl_table_id, {}, {'type_chain': ['char', 'c_8']}, {'type_chain': ['char', 'c_9']})
+    log_table_name = adaptor.get_log_table_id("test", "1")
+    assert "test_1_" in log_table_name
+    log_table_name = adaptor.get_log_table_id("test", "")
+    assert "test__" not in log_table_name
 
 def test_std_case(adaptor: BigQueryAdaptor):
     with open(os.path.join('.', 'input', 'person_simple', '000002.json'), encoding='utf-8') as fp:
@@ -52,8 +56,10 @@ def test_std_case(adaptor: BigQueryAdaptor):
         for line in data_02:
             line["_SEQ"] = datetime.now().strftime('%Y%m%d%H%M%S%f')
     assert adaptor.create_table(std_table_id, {"expires_at": expires_at}, field_data, "normal")
-    assert adaptor.append_normal_data(std_table_id, field_data, data_02, "normal")
-    job = adaptor.connection.query(count_sql.format((adaptor._get_table_id(std_table_id))))
+    assert adaptor.append_normal_data(std_table_id, {}, field_data, data_02, "normal")
+    time.sleep(2)
+    assert not adaptor.purge_segment(std_table_id, {}, [], "raw")
+    job = adaptor.connection.query(count_sql.format((adaptor._get_table_id(std_table_id, ""))))
     assert list(job.result())[0][0] == 1000
 
 def test_aged_case(adaptor: BigQueryAdaptor):
@@ -79,19 +85,30 @@ def test_aged_case(adaptor: BigQueryAdaptor):
     ]
     update_list = [{"_AGE": 104, "id": 2, "first_name": "Rodge", "last_name": "Fratczak", "birthday": "1971-05-25",
                     "city": "Paris", "_OP": 'U'}]
+    part_list = [{"_AGE": 105, "id": 3, "first_name": "", "last_name": "", "birthday": "1971-05-25", "_OP": 'D'}]
     time.sleep(2)
     table_meta["cluster"] = {"first_name": {}}
     assert adaptor.append_log_data(aged_log_table_id, field_data, delete_list + update_list)
     assert adaptor.load_log_data(aged_log_table_id, aged_table_id, field_data, table_meta, 103, 104)
-    job = adaptor.connection.query(count_sql.format((adaptor._get_table_id(aged_table_id))))
+    job = adaptor.connection.query(count_sql.format((adaptor._get_table_id(aged_table_id, ""))))
     assert list(job.result())[0][0] == 999
-    job = adaptor.connection.query(select_sql.format((adaptor._get_table_id(aged_table_id)), "id <= 2"))
+    job = adaptor.connection.query(select_sql.format((adaptor._get_table_id(aged_table_id, "")), "id <= 2"))
     values = [dict(row)["city"] for row in job.result()]
     assert "Paris" in values
     assert len(values) == 1
 
     assert not adaptor.upsert_data(aged_table_id, field_data, delete_list + update_list)
-    assert adaptor.purge_segment(aged_table_id, {}, segment_0)
-    assert adaptor.purge_segment(aged_table_id, {}, segment_1)
-    assert adaptor.purge_segment(aged_table_id, {}, segment_2)
-    assert adaptor.purge_segment(aged_table_id, {}, segment_3)
+    assert adaptor.purge_segment(aged_table_id, {"segment": segment_0}, field_data, "raw" )
+
+    assert adaptor.append_log_data(aged_log_table_id, field_data, part_list)
+    assert adaptor.load_log_data(aged_log_table_id, aged_table_id, field_data, table_meta, 105, 105)
+
+def test_excpetions(adaptor: BigQueryAdaptor):
+    assert adaptor._escape_column_name(r"/TEST/Hello") == "_TEST_Hello"
+    assert adaptor._escape_column_name(r"0Hello") == "_0Hello"
+    assert adaptor._escape_column_name(r"_TABLE_Hello") == "__TABLE_Hello"
+    long_str = "".join([str(x) for x in range(100)])
+    assert len(adaptor._escape_column_name(long_str)) == 128
+    assert adaptor.drop_table("Dummy", {})
+    with pytest.raises(TypeError):
+        adap = BigQueryAdaptor(db=object())

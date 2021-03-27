@@ -3,13 +3,14 @@ from typing import List, Union
 from datetime import datetime, timedelta
 from google.cloud import bigquery
 import google.auth
-from google.api_core.exceptions import Conflict, BadRequest
+from google.api_core.exceptions import Conflict, BadRequest, NotFound
 from xialib.adaptor import Adaptor
 
 
 class BigQueryAdaptor(Adaptor):
     support_add_column = True
     support_alter_column = True
+    segment_is_table = True
 
     _age_field = {'field_name': '_AGE', 'key_flag': False, 'type_chain': ['int', 'ui_8'],
                   'format': None, 'encode': None, 'default': 0}
@@ -52,7 +53,7 @@ class BigQueryAdaptor(Adaptor):
 
     delete_sql_template = "DELETE FROM {} WHERE {}"
 
-    def __init__(self, db: bigquery.Client, location: str = 'EU', **kwargs):
+    def __init__(self, db: bigquery.Client, location: str = 'EU', log_dataset: str = "", **kwargs):
         super().__init__(**kwargs)
         if not isinstance(db, bigquery.Client):
             self.logger.error("connection must a big-query client", extra=self.log_context)
@@ -61,6 +62,7 @@ class BigQueryAdaptor(Adaptor):
             self.connection = db
         self.location = location
         self.default_project = google.auth.default()[1]
+        self.log_dataset = log_dataset
 
     def _escape_column_name(self, old_name: str) -> str:
         """A column name must contain only letters (a-z, A-Z), numbers (0-9), or underscores (_),
@@ -108,9 +110,10 @@ class BigQueryAdaptor(Adaptor):
         dataset_id = '.'.join([project_id, dataset_name])
         return dataset_id
 
-    def _get_table_id(self, table_id) -> str:
+    def _get_table_id(self, table_id, segment_id: str) -> str:
         dataset_id = self._get_dataset_id(table_id)
-        bq_table_id = '.'.join([dataset_id, table_id.split('.')[-1]])
+        table_name = table_id.split('.')[-1] + "_" + segment_id if segment_id else table_id.split('.')[-1]
+        bq_table_id = '.'.join([dataset_id, table_name])
         return bq_table_id
 
     def _get_time_partition_condition(self, table_id: str, dt_type: str, field_name: str, start_age, end_age) -> str:
@@ -120,7 +123,7 @@ class BigQueryAdaptor(Adaptor):
         get_partition_sql = get_partition_sql_template.format(
             self._sql_safe(field_name),
             self._sql_safe(dt_type),
-            self._get_table_id(table_id),
+            self._get_table_id(table_id, ""), # This function works only with log table
             start_age,
             end_age
         )
@@ -141,7 +144,7 @@ class BigQueryAdaptor(Adaptor):
                                        "FROM {} WHERE _AGE >= {} AND _AGE <= {} ")
         get_partition_sql = get_partition_sql_template.format(
             self._sql_safe(field_name),
-            self._get_table_id(table_id),
+            self._get_table_id(table_id, ""), # This function works only with log table
             start_age,
             end_age
         )
@@ -151,7 +154,7 @@ class BigQueryAdaptor(Adaptor):
         values = ["'" + value + "'" for value in values if value is not None]
         filter = "origin." + field_name + " IN (" + ", ".join(values) + ")" if values else "1 = 0"
         if null_flag:
-            result_sql = "(" + filter + " OR " + "origin." + field_name + " IS NULL)"
+            result_sql = "(" + filter + " OR " + "origin." + field_name + " IS NULL)"  # pragma: no cover
         else:
             result_sql = filter
         return result_sql
@@ -174,6 +177,7 @@ class BigQueryAdaptor(Adaptor):
             "WHEN MATCHED AND _OP = 'D' THEN DELETE \n"
             "WHEN MATCHED AND _OP != 'D' THEN UPDATE SET {} "
         )
+        segment_id = meta_data.get("segment", {}).get("id", "")
         partition_conf = meta_data.get("partition", {})
         partition_field = list(partition_conf)[0] if partition_conf else ""
         partition_conf = partition_conf[partition_field] if partition_field else {}
@@ -181,9 +185,9 @@ class BigQueryAdaptor(Adaptor):
         if partition_type == "time":
             partition_condition = self._get_time_partition_condition(log_table_id, partition_conf["criteria"],
                                                                      partition_field, start_age, end_age)
-        elif partition_type:
+        elif partition_type:  # pragma: no cover
             partition_condition = self._get_std_partition_condition(log_table_id, partition_field, start_age, end_age)
-        else:
+        else:  # pragma: no cover
             partition_condition = "1 = 1"
 
         # One level cluster limit should be sufficient
@@ -205,8 +209,8 @@ class BigQueryAdaptor(Adaptor):
                                         for field in field_data if not field['key_flag']])
 
         load_log_sql = load_log_sql_template.format(
-            self._get_table_id(table_id),
-            self._get_table_id(log_table_id),
+            self._get_table_id(table_id, segment_id),
+            self._get_table_id(log_table_id, ""),
             start_age,
             end_age,
             self._sql_safe(partition_condition),
@@ -223,10 +227,20 @@ class BigQueryAdaptor(Adaptor):
         old_age_condition = "_AGE <= {}".format(end_age)
         old_dt_condition = "_DT <= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 90 MINUTE)"
         remove_old_log_sql = self.delete_sql_template.format(
-            self._get_table_id(log_table_id),
+            self._get_table_id(log_table_id, ""),
             self._sql_safe(" AND ".join([old_age_condition, old_dt_condition])),
         )
         return remove_old_log_sql
+
+    def get_log_table_id(self, table_id: str, segment_id: str):
+        table_path = table_id.split(".")
+        project_id = table_path[-3] if len(table_path) >= 3 and table_path[-3] else self.default_project
+        dataset_name = table_path[-2] if len(table_path) >= 2 and table_path[-2] else 'xia_default'
+        dataset_name = self.log_dataset if self.log_dataset else dataset_name
+        suffix = "_" + str(int(datetime.now().timestamp()))
+        table_name = table_id.split('.')[-1] + "_" + segment_id if segment_id else table_id.split('.')[-1]
+        log_table_id = '.'.join([project_id, dataset_name, table_name + suffix])
+        return log_table_id
 
     def append_log_data(self, table_id: str, field_data: List[dict], data: List[dict], **kwargs):
         conv_func_dict = self.get_dt_conv_func_dict(field_data)
@@ -239,7 +253,7 @@ class BigQueryAdaptor(Adaptor):
                     line[field] = conv_func_dict[field](line[field])
                 load_data.append({self._escape_column_name(k): v for k, v in line.items()})
             try:
-                errors = self.connection.insert_rows_json(self._get_table_id(table_id), load_data)
+                errors = self.connection.insert_rows_json(self._get_table_id(table_id, ""), load_data)
             except BadRequest as e:  # pragma: no cover
                 return False  # pragma: no cover
             if errors == []:
@@ -266,7 +280,9 @@ class BigQueryAdaptor(Adaptor):
         job.result()
         return True
 
-    def append_normal_data(self, table_id: str, field_data: List[dict], data: List[dict], type: str, **kwargs):
+    def append_normal_data(self, table_id: str, meta_data: dict, field_data: List[dict], data: List[dict], type: str,
+                           **kwargs):
+        segment_id = meta_data.get("segment", {}).get("id", "")
         conv_func_dict = self.get_dt_conv_func_dict(field_data)
         for i in range(((len(data) - 1) // 10000) + 1):
             start, end = i * 10000, (i + 1) * 10000
@@ -276,7 +292,7 @@ class BigQueryAdaptor(Adaptor):
                     line[field] = conv_func_dict[field](line[field])
                 load_data.append({self._escape_column_name(k): v for k, v in line.items()})
             try:
-                errors = self.connection.insert_rows_json(self._get_table_id(table_id), load_data)
+                errors = self.connection.insert_rows_json(self._get_table_id(table_id, segment_id), load_data)
             except BadRequest as e:  # pragma: no cover
                 return False  # pragma: no cover
             if errors == []:
@@ -290,14 +306,11 @@ class BigQueryAdaptor(Adaptor):
         self.logger.error("Bigquery Adaptor does not support upsert on-the-fly", extra=self.log_context)
         return False
 
-    def purge_aged_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
-        pass
-
-    def purge_std_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
-        pass
-
-    def purge_segment(self, table_id: str, meta_data: dict, segment_config: Union[dict, None]):
-        return True
+    def purge_segment(self, table_id: str, meta_data: dict, field_data: List[dict], type: str):
+        if self.drop_table(table_id, meta_data):
+            return self.create_table(table_id, meta_data, field_data, type)
+        else:
+            return False
 
     def create_table(self, table_id: str, meta_data: dict, field_data: List[dict], type: str):
         # Dataset level operation
@@ -309,10 +322,11 @@ class BigQueryAdaptor(Adaptor):
             self.logger.info("Dataset already exists, donothing", extra=self.log_context)
 
         # Table Schema Definition
+        segment_id = meta_data.get("segment", {}).get("id", "")
         field_list = field_data.copy()
         field_list.extend(self.table_extension.get(type))
         schema = self._get_table_schema(field_list)
-        table = bigquery.Table(self._get_table_id(table_id), schema=schema)
+        table = bigquery.Table(self._get_table_id(table_id, segment_id), schema=schema)
         # Table Clustering
         if "cluster" in meta_data or "segment" in meta_data:
             partition_field = meta_data.get("segment", {}).get("field_name", "")
@@ -340,25 +354,37 @@ class BigQueryAdaptor(Adaptor):
             self.logger.error("Table Creation Failed: {}".format(e), extra=self.log_context)
             return False
 
-    def drop_table(self, table_id: str):
+    def drop_table(self, table_id: str, meta_data: dict):
+        segment_id = meta_data.get("segment", {}).get("id", "")
         try:
-            self.connection.delete_table(self._get_table_id(table_id), not_found_ok=True, timeout=30)
+            delete_all_sql = self.delete_sql_template.format(self._get_table_id(table_id, segment_id), "1 = 1")
+            delete_job = self.connection.query(delete_all_sql)
+            delete_job.result()
+        except BadRequest as e:
+            self.logger.error("Table with streaming buffer couldn't be dropped: {}".format(e), extra=self.log_context)
+            return False
+        except NotFound as e:
+            return True
+        try:
+            self.connection.delete_table(self._get_table_id(table_id, segment_id), not_found_ok=True, timeout=30)
         except Exception as e:  # pragma: no cover
             self.logger.error("Table drop failed: {}".format(e), extra=self.log_context)
             return False
+        return True
 
-    def alter_column(self, table_id: str, old_field_line: dict, new_field_line: dict):
+    def alter_column(self, table_id: str, meta_data: dict, old_field_line: dict, new_field_line: dict):
         if not self.support_alter_column:
             return False
         old_type = self._get_field_type(old_field_line['type_chain'])
         new_type = self._get_field_type(new_field_line['type_chain'])
         return True if old_type == new_type else False
 
-    def add_column(self, table_id: str, new_field_line: dict):
+    def add_column(self, table_id: str, meta_data: dict, new_field_line: dict):
+        segment_id = meta_data.get("segment", {}).get("id", "")
         if not self.support_add_column:
             return False
         field_list = [new_field_line]
-        table = self.connection.get_table(self._get_table_id(table_id))
+        table = self.connection.get_table(self._get_table_id(table_id, segment_id))
         original_schema = table.schema
         new_schema = original_schema[:]
         new_schema.extend(self._get_table_schema(field_list))
